@@ -6,7 +6,6 @@
 
 <p align="center">
   <a href="https://clario-af973.web.app" target="_blank"><strong>🚀 Live Demo</strong></a> •
-  <a href="https://github.com/rc-dev16/Clario" target="_blank"><strong>📦 GitHub Repo</strong></a>
 </p>
 
 ---
@@ -29,7 +28,7 @@ You upload a contract, and Clario:
 | 🔧 Area          | 🚀 Technology                                                |
 |------------------|-------------------------------------------------------------|
 | **Frontend**     | React, TypeScript, Vite, Tailwind CSS                       |
-| **AI Engine**    | Gemini API (Google GenAI), OpenAI (optional)                |
+| **AI Engine**    | Gemini API (Google GenAI)                               |
 | **Parsing**      | PDF.js, Mammoth, pdf-parse                                  |
 | **Backend**      | Firebase Auth, Firestore, Hosting, Analytics                |
 | **Utils & Tools**| Axios, UUID, date-fns, ESLint, Jest                         |
