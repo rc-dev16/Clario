@@ -1,7 +1,7 @@
 {
   "name": "functions",
   "description": "Cloud Functions – Gemini proxy (keeps API key server-side)",
-  "engines": { "node": "18" },
+  "engines": { "node": "20" },
   "main": "index.js",
   "dependencies": {
     "firebase-functions": "^6.0.0"
