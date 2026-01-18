@@ -5,7 +5,7 @@ import { getAnalytics, isSupported } from "firebase/analytics";
 
 // For Firebase JS SDK v7.20.0 and later, measurementId is optional
 const firebaseConfig = {
-  apiKey: "${VITE_FIREBASE_API_KEY}",
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "",
   authDomain: "clario-af973.firebaseapp.com",
   projectId: "clario-af973",
   storageBucket: "clario-af973.firebasestorage.app",
