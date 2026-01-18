@@ -55,15 +55,16 @@ const Dashboard: React.FC = () => {
     } else {
       setContracts([]);
     }
-    // Fetch contractsAnalyzed from Firestore
+    // Fetch contractsAnalyzed from Firestore (use user?.id to avoid re-runs from user object reference changes)
+    if (!user?.id) return;
+    let cancelled = false;
     const fetchCount = async () => {
-      if (user) {
-        const count = await getContractsAnalyzed(user.id);
-        setContractsAnalyzed(count);
-      }
+      const count = await getContractsAnalyzed(user.id);
+      if (!cancelled) setContractsAnalyzed(count);
     };
     fetchCount();
-  }, [user]); // Re-run when user changes
+    return () => { cancelled = true; };
+  }, [user?.id]);
 
   // Use contractsAnalyzed from Firestore for docsLeft
   const docsLeft = user ? Math.max(0, user.maxContracts - contractsAnalyzed) : 0;

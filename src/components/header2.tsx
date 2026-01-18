@@ -8,14 +8,15 @@ import { getContractsAnalyzed } from '../services/analysisService';
 const ProfileModal = ({ user, onClose }: { user: any, onClose: () => void }) => {
   const [contractsAnalyzed, setContractsAnalyzed] = React.useState<number>(user.contractsAnalyzed || 0);
   React.useEffect(() => {
+    if (!user?.id) return;
+    let cancelled = false;
     const fetchCount = async () => {
-      if (user) {
-        const count = await getContractsAnalyzed(user.id);
-        setContractsAnalyzed(count);
-      }
+      const count = await getContractsAnalyzed(user.id);
+      if (!cancelled) setContractsAnalyzed(count);
     };
     fetchCount();
-  }, [user]);
+    return () => { cancelled = true; };
+  }, [user?.id]);
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center min-h-screen bg-black/40 backdrop-blur-sm">
       <div className="bg-white rounded-3xl shadow-2xl border border-gray-200 w-full max-w-sm p-0 relative animate-scale-in">

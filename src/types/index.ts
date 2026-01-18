@@ -9,6 +9,7 @@ export interface User {
   avatar?: string;
   lastAnalysis?: string | null;
   subscriptionStatus?: 'active' | 'expired' | 'trial';
+  isTester?: boolean; // Allow unlimited uploads for tester accounts
 }
 
 export interface ContractField {

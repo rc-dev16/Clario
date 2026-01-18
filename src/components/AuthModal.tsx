@@ -45,6 +45,14 @@ const AuthPage: React.FC<AuthPageProps> = ({ initialMode = 'login' }) => {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
+    // Password validation for registration
+    if (mode === 'register') {
+      const passwordRules = /^(?=.*[A-Za-z])(?=.*\d)(?=.*[!@#$%^&*()_+\-=[\]{};':"\\|,.<>/?]).{8,}$/;
+      if (!passwordRules.test(password)) {
+        setError('Password must be at least 8 characters long and include at least one letter, one number, and one special character.');
+        return;
+      }
+    }
     try {
       if (mode === 'login') {
         await login(email, password);
@@ -178,6 +186,7 @@ const AuthPage: React.FC<AuthPageProps> = ({ initialMode = 'login' }) => {
                 {forgotMessage && (
                   <div className="bg-green-50 border border-green-200 text-green-700 px-4 py-3 rounded-lg text-sm text-center mb-2 animate-fade-in">
                     {forgotMessage}
+                    <div className="text-xs text-gray-500 mt-2">If you don't see the email, please check your spam or junk folder.</div>
                   </div>
                 )}
                 {forgotError && (

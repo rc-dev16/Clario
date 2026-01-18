@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Scale, CheckCircle, Star, ArrowRight, Shield, Zap, Users, Sparkles, Globe, Lock, TrendingUp } from 'lucide-react';
+import { Scale, CheckCircle, Star, ArrowRight, Shield, Zap, Users, Sparkles} from 'lucide-react';
 import Header from './header2';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
@@ -87,6 +87,9 @@ const useContinuousTyping = (texts: string[], speed: number = 80, pauseDuration:
   return { displayText, isTyping };
 };
 
+// Stable array for useContinuousTyping to avoid effect re-runs on every render
+const ROTATING_TEXTS = ["with AI", "and Precision"];
+
 const LandingPage: React.FC = () => {
   const [showDemoModal, setShowDemoModal] = useState(false);
   const [isVisible, setIsVisible] = useState(false);
@@ -94,9 +97,9 @@ const LandingPage: React.FC = () => {
   // Static typing for first line
   const line1 = useTypingAnimation("Analyze Legal Contracts", 80);
   
-  // Continuous typing for the rotating text
+  // Continuous typing for the rotating text (ROTATING_TEXTS is stable to prevent effect loops)
   const continuousText = useContinuousTyping(
-    ["with AI", "and Precision"], 
+    ROTATING_TEXTS, 
     80, 
     2000, 
     line1.isComplete ? 500 : 0
@@ -380,7 +383,15 @@ const LandingPage: React.FC = () => {
                     <span className="text-lg">Priority support</span>
                   </li>
                 </ul>
-                <button className="w-full bg-white text-gray-900 py-4 rounded-2xl hover:bg-gray-100 transition-all duration-300 font-bold text-lg hover:scale-105 shadow-lg">
+                <button
+                  className="w-full bg-white text-gray-900 py-4 rounded-2xl hover:bg-gray-100 transition-all duration-300 font-bold text-lg hover:scale-105 shadow-lg"
+                  onClick={() => {
+                    const supportSection = document.getElementById('support-section');
+                    if (supportSection) {
+                      supportSection.scrollIntoView({ behavior: 'smooth' });
+                    }
+                  }}
+                >
                   Upgrade to Pro
                 </button>
               </div>
@@ -470,9 +481,10 @@ const LandingPage: React.FC = () => {
               </ul>
             </div>
             <div>
-              <h4 className="font-bold mb-6 text-xl">Support</h4>
+              <h4 id="support-section" className="font-bold mb-6 text-xl">Support</h4>
               <ul className="space-y-3 text-gray-400">
                 <li><a href="mailto:clario.help@proton.me" className="hover:text-white transition-colors text-lg">Contact: clario.help@proton.me</a></li>
+                <li className="text-yellow-400 font-semibold">Pro plan coming soon!</li>
               </ul>
             </div>
           </div>

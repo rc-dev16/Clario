@@ -1,6 +1,6 @@
-import { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+import { createContext, useContext, useState, useEffect, useCallback, useMemo, ReactNode } from 'react';
 import { User } from '../types';
-import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged, User as FirebaseUser, GoogleAuthProvider, signInWithPopup, sendPasswordResetEmail } from 'firebase/auth';
+import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged, User as FirebaseUser, GoogleAuthProvider, signInWithRedirect, getRedirectResult, sendPasswordResetEmail } from 'firebase/auth';
 import { getFirestore, doc, setDoc, getDoc } from 'firebase/firestore';
 // @ts-ignore
 import app from '../../firebase-config.js';
@@ -49,33 +49,75 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
-      if (firebaseUser) {
-        // Try to get extra user data from Firestore
-        const userDoc = await getDoc(doc(db, 'users', firebaseUser.uid));
-        const extraData = userDoc.exists() ? userDoc.data() : {};
-        setUser(mapFirebaseUser(firebaseUser, extraData));
-      } else {
-        setUser(null);
+    let unsub: (() => void) | null = null;
+
+    (async () => {
+      try {
+        const result = await getRedirectResult(auth);
+        if (result?.user) {
+          let extraData: Record<string, unknown> = {};
+          try {
+            const userDoc = await getDoc(doc(db, 'users', result.user.uid));
+            extraData = userDoc.exists() ? (userDoc.data() as Record<string, unknown>) : {};
+            if (!userDoc.exists()) {
+              await setDoc(doc(db, 'users', result.user.uid), {
+                name: result.user.displayName,
+                email: result.user.email,
+                plan: 'free',
+                contractsAnalyzed: 0,
+                maxContracts: 5,
+                createdAt: new Date().toISOString(),
+              });
+            }
+          } catch (e) {
+            console.warn('Could not load/save user profile after redirect:', e);
+          }
+          setUser(mapFirebaseUser(result.user, extraData));
+        }
+      } catch (e) {
+        console.warn('getRedirectResult failed:', e);
       }
-      setLoading(false);
-    });
-    return () => unsubscribe();
+
+      unsub = onAuthStateChanged(auth, async (firebaseUser) => {
+        if (firebaseUser) {
+          let extraData: Record<string, unknown> = {};
+          try {
+            const userDoc = await getDoc(doc(db, 'users', firebaseUser.uid));
+            extraData = userDoc.exists() ? (userDoc.data() as Record<string, unknown>) : {};
+          } catch (e) {
+            console.warn('Could not load user profile from Firestore, using defaults:', e);
+          }
+          setUser(mapFirebaseUser(firebaseUser, extraData));
+        } else {
+          setUser(null);
+        }
+        setLoading(false);
+      });
+    })();
+
+    return () => { unsub?.(); };
   }, []);
 
-  const login = async (email: string, password: string) => {
+  const login = useCallback(async (email: string, password: string) => {
     setLoading(true);
     try {
       await signInWithEmailAndPassword(auth, email, password);
       // onAuthStateChanged will update user
     } catch (err: any) {
+      // Firebase error code for user-not-found or invalid-credential
+      if (
+        err?.code === 'auth/user-not-found' ||
+        err?.code === 'auth/invalid-credential'
+      ) {
+        throw new Error('No account found with this email. Please sign up first.');
+      }
       throw new Error(err?.message || 'Login failed.');
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
-  const register = async (email: string, password: string, name: string) => {
+  const register = useCallback(async (email: string, password: string, name: string) => {
     setLoading(true);
     try {
       const userCredential = await createUserWithEmailAndPassword(auth, email, password);
@@ -94,35 +136,20 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
-  const googleSignIn = async () => {
+  const googleSignIn = useCallback(async () => {
     setLoading(true);
     try {
       const provider = new GoogleAuthProvider();
-      const result = await signInWithPopup(auth, provider);
-      const firebaseUser = result.user;
-      // Store extra user info in Firestore if not present
-      const userDoc = await getDoc(doc(db, 'users', firebaseUser.uid));
-      if (!userDoc.exists()) {
-        await setDoc(doc(db, 'users', firebaseUser.uid), {
-          name: firebaseUser.displayName,
-          email: firebaseUser.email,
-          plan: 'free',
-          contractsAnalyzed: 0,
-          maxContracts: 5,
-          createdAt: new Date().toISOString(),
-        });
-      }
-      // onAuthStateChanged will update user
+      await signInWithRedirect(auth, provider);
     } catch (err: any) {
-      throw new Error(err?.message || 'Google sign-in failed.');
-    } finally {
       setLoading(false);
+      throw new Error(err?.message || 'Google sign-in failed.');
     }
-  };
+  }, []);
 
-  const forgotPassword = async (email: string) => {
+  const forgotPassword = useCallback(async (email: string) => {
     setLoading(true);
     try {
       await sendPasswordResetEmail(auth, email);
@@ -131,9 +158,9 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
-  const logout = async () => {
+  const logout = useCallback(async () => {
     setLoading(true);
     try {
       await signOut(auth);
@@ -141,10 +168,15 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
+
+  const value = useMemo(
+    () => ({ user, loading, login, register, logout, googleSignIn, forgotPassword }),
+    [user, loading, login, register, logout, googleSignIn, forgotPassword]
+  );
 
   return (
-    <AuthContext.Provider value={{ user, loading, login, register, logout, googleSignIn, forgotPassword }}>
+    <AuthContext.Provider value={value}>
       {children}
     </AuthContext.Provider>
   );

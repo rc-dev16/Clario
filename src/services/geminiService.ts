@@ -1,5 +1,6 @@
-import axios from 'axios';
 import { AnalysisResult } from '../types/index';
+import mammoth from 'mammoth';
+import { callGemini } from './geminiApi';
 import { v4 as uuidv4 } from 'uuid';
 // @ts-ignore
 import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf';
@@ -7,15 +8,14 @@ import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf';
 (pdfjsLib as any).GlobalWorkerOptions.workerSrc = '/pdf.worker.js';
 
 // Constants
-const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB
+const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 const SUPPORTED_FILE_TYPES = [
   'application/pdf',
   'application/msword',
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
 ];
-const INITIAL_DELAY = 1000;
-const RETRY_DELAY = 2000;
-const MAX_RETRIES = 5;
+const RETRY_DELAY_MS = 2000;
+const MAX_429_RETRIES = 2; // 429 only: 3 calls total
 
 export class AnalysisError extends Error {
   code: string;
@@ -76,14 +76,32 @@ export const extractFileContent = async (file: File): Promise<string> => {
           false
         );
       }
+    } else if (fileType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' || file.name.endsWith('.docx')) {
+      // DOCX extraction using mammoth
+      try {
+        const arrayBuffer = await file.arrayBuffer();
+        const { value: text } = await mammoth.extractRawText({ arrayBuffer });
+        if (!text || text.trim().length === 0) {
+          throw new Error('DOCX file appears to be empty or could not be read.');
+        }
+        return text;
+      } catch (docxError) {
+        console.error('DOCX extraction failed:', docxError);
+        throw new AnalysisError(
+          'DOCX_EXTRACTION_FAILED',
+          'Failed to extract text from DOCX',
+          docxError instanceof Error ? docxError.message : 'Unknown DOCX extraction error',
+          false
+        );
+      }
     } else if (fileType === 'text/plain' || file.name.endsWith('.txt')) {
       // Plain text extraction
       return await file.text();
     } else {
       throw new AnalysisError(
         'UNSUPPORTED_FILE_TYPE',
-        'Only PDF and TXT files are supported',
-        `File type: ${file.type}. Only PDF and TXT files are supported.`,
+        'Only PDF, DOCX, and TXT files are supported',
+        `File type: ${file.type}. Only PDF, DOCX, and TXT files are supported.`,
         false
       );
     }
@@ -118,108 +136,128 @@ interface GeminiResponse {
 
 const getCompletion = async (prompt: string, retryCount = 0): Promise<GeminiResponse> => {
   try {
-    const apiKey = import.meta.env.VITE_GOOGLE_API_KEY;
-    if (!apiKey) {
+    const response = await callGemini({
+      contents: [{ parts: [{ text: prompt }] }],
+      generationConfig: {
+        temperature: 0.2,
+        topP: 0.95,
+        topK: 40,
+        maxOutputTokens: 8192,
+        responseMimeType: 'application/json',
+      },
+    });
+    return response as GeminiResponse;
+  } catch (error: unknown) {
+    const err = error as {
+      message?: string;
+      code?: string;
+      response?: { status?: number; data?: unknown; headers?: Record<string, string> };
+      details?: { status?: number; body?: string };
+    };
+
+    const status = err.response?.status ?? err.details?.status;
+    const msg = err.message || err.details?.body || 'Unknown error';
+
+    console.error('Error in getCompletion:', {
+      message: err.message,
+      status,
+    });
+
+    // Only retry 429 when from direct (axios) path; callable already retries.
+    if (status === 429 && retryCount < MAX_429_RETRIES && err.response) {
+      const retryAfter = err.response?.headers?.['retry-after'] ?? err.response?.headers?.['retry-after-ms'];
+      const delayMs = retryAfter
+        ? Number(retryAfter) * (String(retryAfter).length <= 3 ? 1000 : 1)
+        : Math.min(30_000, RETRY_DELAY_MS * Math.pow(2, retryCount));
+      console.warn(`Rate limited (429). Retrying after ${delayMs}ms...`);
+      await new Promise((r) => setTimeout(r, delayMs));
+      return getCompletion(prompt, retryCount + 1);
+    }
+
+    if (status === 429) {
       throw new AnalysisError(
-        'MISSING_API_KEY',
-        'Google API key is not configured',
-        'Please set the VITE_GOOGLE_API_KEY environment variable',
+        'RATE_LIMIT',
+        'Too many requests. Please wait a minute and try again.',
+        msg,
         false
       );
     }
 
-    if (retryCount === 0) {
-      await new Promise(resolve => setTimeout(resolve, INITIAL_DELAY));
+    if (err.code === 'functions/unauthenticated') {
+      throw new AnalysisError('AUTH_REQUIRED', 'Sign in to use this feature.', msg, false);
     }
-    
-    const response = await axios.post(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
-      {
-        contents: [{
-          parts: [{
-            text: prompt
-          }]
-        }],
-        generationConfig: {
-          temperature: 0.2,
-          topP: 0.95,
-          topK: 40,
-          maxOutputTokens: 4096,
-          responseMimeType: 'application/json',
-        }
-      },
-      {
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json'
-        },
-        // API key is now in the URL
-        timeout: 30000 // 30 seconds timeout
-      }
-    );
-    
-    return response;
-    
-  } catch (error: unknown) {
-    const errorResponse = error as {
-      message: string;
-      response?: {
-        status?: number;
-        data?: any;
-        headers?: {
-          'retry-after'?: string;
-          'retry-after-ms'?: string;
-        };
-      };
-      config?: {
-        url?: string;
-        method?: string;
-        params?: any;
-      };
-    };
-    
-    console.error('Error in getCompletion:', {
-      message: errorResponse.message,
-      status: errorResponse.response?.status,
-      data: errorResponse.response?.data,
-      config: {
-        url: errorResponse.config?.url,
-        method: errorResponse.config?.method,
-        params: errorResponse.config?.params,
-      }
-    });
-    
-    if (errorResponse.response?.status === 429 && retryCount < MAX_RETRIES) {
-      const retryAfter = errorResponse.response?.headers?.['retry-after'] || 
-                        errorResponse.response?.headers?.['retry-after-ms'];
-      const delay = retryAfter 
-        ? Number(retryAfter) * (retryAfter.toString().length <= 3 ? 1000 : 1) // Handle both seconds and milliseconds
-        : RETRY_DELAY * Math.pow(2, retryCount);
-      
-      console.log(`Rate limited. Retrying after ${delay}ms...`);
-      await new Promise(resolve => setTimeout(resolve, delay));
-      return getCompletion(prompt, retryCount + 1);
-    }
-    
+
     throw new AnalysisError(
-      'AI_REQUEST', 
-      'Failed to process document', 
-      errorResponse.response?.data?.error?.message || errorResponse.message || 'Unknown error', 
+      'AI_REQUEST',
+      'AI is temporarily unavailable. Please try again.',
+      msg,
       false
     );
   }
 };
 
+function repairTruncatedJson(s: string): string {
+  const t = s.trim();
+  if (/[}\]]\s*$/.test(t)) return s;
+  const openC = (t.match(/{/g) || []).length - (t.match(/}/g) || []).length;
+  const openS = (t.match(/\[/g) || []).length - (t.match(/]/g) || []).length;
+  return s + '"' + ']'.repeat(Math.max(0, openS)) + '}'.repeat(Math.max(0, openC));
+}
+
+/** Replaces raw newlines/carriage returns inside JSON string values with \\n / \\r. */
+function replaceLiteralNewlinesInStrings(s: string): string {
+  let inString = false;
+  let escape = false;
+  const out: string[] = [];
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (escape) {
+      out.push(c);
+      escape = false;
+    } else if (c === "\\") {
+      out.push(c);
+      escape = true;
+    } else if (c === '"') {
+      out.push(c);
+      inString = !inString;
+    } else if (inString && (c === "\n" || c === "\r")) {
+      out.push(c === "\r" ? "\\r" : "\\n");
+    } else {
+      out.push(c);
+    }
+  }
+  return out.join("");
+}
+
+function tryParseJson(completion: string): Record<string, unknown> {
+  let jsonString = completion
+    .replace(/^```(?:json)?\s*/g, '')
+    .replace(/```\s*$/g, '')
+    .trim();
+  try {
+    return JSON.parse(jsonString) as Record<string, unknown>;
+  } catch (e) {
+    if (!(e instanceof SyntaxError) || !/Unterminated string|Unexpected end/i.test(e.message)) throw e;
+    for (const repair of [repairTruncatedJson, replaceLiteralNewlinesInStrings]) {
+      try {
+        return JSON.parse(repair(jsonString)) as Record<string, unknown>;
+      } catch {
+        /* try next */
+      }
+    }
+    try {
+      return JSON.parse(repairTruncatedJson(replaceLiteralNewlinesInStrings(jsonString))) as Record<string, unknown>;
+    } catch {
+      /* fallback: repair truncation after fixing newlines */
+    }
+    throw e;
+  }
+}
+
 const parseCompletion = (completion: string): AnalysisResult => {
   try {
-    // Clean up the response - remove markdown code block markers if present
-    let jsonString = completion
-      .replace(/^```(?:json)?\s*/g, '')  // Remove starting ```json or ```
-      .replace(/```\s*$/g, '')           // Remove ending ```
-      .trim();
-    
-    // Try to parse the completion as JSON
-    const parsed = JSON.parse(jsonString);
+    // Cast: AI JSON shape varies; parseCompletion already handles missing/weird fields
+    const parsed = tryParseJson(completion) as any;
     
     // Format the summary points from the contract analysis
     const summaryPoints: string[] = [];
@@ -319,26 +357,7 @@ const parseCompletion = (completion: string): AnalysisResult => {
     return analysisResult;
   } catch (error) {
     console.error('Error parsing contract analysis:', error);
-    
-    // Fallback response if parsing fails
-    const fallbackResult: AnalysisResult = {
-      id: uuidv4(),
-      fileName: 'Contract',
-      fileSize: '0',
-      analysisDate: new Date().toISOString(),
-      summary: {
-        points: [
-          'Could not analyze the contract content.',
-          'Please ensure the document is a valid contract and try again.'
-        ]
-      },
-      documentType: 'Contract',
-      fields: [] as any[], // ContractField[] is removed, so use any[] for now
-      riskLevel: 'High',
-      completionScore: 0
-    };
-    
-    return fallbackResult;
+    throw new Error('Failed to parse AI response as JSON');
   }
 };
 
@@ -363,7 +382,7 @@ const generatePrompt = (content: string, fileName: string): string => {
   ✓ Any unusual, missing, or ambiguous clauses or terms
   ✓ Overall risk assessment
 
-  IMPORTANT: Your response MUST be a valid JSON object with NO additional text before or after. Use this exact structure:
+  IMPORTANT: Your response MUST be valid JSON only (no extra text). In string values: escape newlines as \\n and double-quotes as \\". If you approach length limits, omit optional fields (exhibits, signatureBlocks) rather than cutting off mid-string. Use this structure:
 
   {
     "contractType": "[Type of contract]",
@@ -406,174 +425,85 @@ const generatePrompt = (content: string, fileName: string): string => {
 `;
 };
 
-export const analyzeDocumentWithGemini = async (file: File | null): Promise<AnalysisResult> => {
-  // 1. Validate file
-  if (!file) {
-    throw new AnalysisError('INVALID_INPUT', 'No file provided', 'Please provide a valid file', true);
-  }
+export const analyzeDocumentWithGemini = async (file: File, content: string): Promise<AnalysisResult> => {
+  const prompt = generatePrompt(content, file.name);
+  const MAX_PARSE_RETRIES = 1;
+  let parseAttempts = 0;
 
-  try {
-    // 2. Validate file type and size
-    const validationError = validateFile(file);
-    if (validationError) {
-      throw validationError;
-    }
+  while (true) {
+    try {
+      const response = await getCompletion(prompt);
+      if (!response?.data) {
+        throw new AnalysisError(
+          'EMPTY_RESPONSE',
+          'AI is temporarily unavailable. Please try again.',
+          'No response data',
+          false
+        );
+      }
 
-    // 3. Extract text content
-    const content = await extractFileContent(file);
-    
-    if (!content || typeof content !== 'string' || content.trim().length === 0) {
+      let completionText = '';
+      const responseData = response.data;
+      if (Array.isArray(responseData.candidates) && responseData.candidates.length > 0) {
+        const c = responseData.candidates[0];
+        if (c?.content?.parts?.[0]?.text) completionText = c.content.parts[0].text;
+      } else if (Array.isArray(responseData.choices) && responseData.choices.length > 0) {
+        const c = responseData.choices[0];
+        if (c?.message?.content) completionText = c.message.content;
+      } else if (typeof responseData.text === 'string') {
+        completionText = responseData.text;
+      } else if (typeof responseData === 'string') {
+        completionText = responseData;
+      } else {
+        try { completionText = JSON.stringify(responseData); } catch (_) {}
+      }
+
+      if (!completionText || typeof completionText !== 'string' || completionText.trim().length === 0) {
+        throw new AnalysisError(
+          'EMPTY_RESPONSE',
+          'AI is temporarily unavailable. Please try again.',
+          'Empty completion',
+          false
+        );
+      }
+
+      const result = parseCompletion(completionText);
+
+      return {
+        id: result.id || uuidv4(),
+        fileName: file.name,
+        fileSize: file.size,
+        analysisDate: result.analysisDate || new Date().toISOString(),
+        summary: result.summary || { points: [] },
+        documentType: result.documentType || 'Document',
+        fields: Array.isArray(result.fields) ? result.fields : [],
+        riskLevel: ['Low', 'Medium', 'High'].includes(result.riskLevel) ? result.riskLevel as 'Low' | 'Medium' | 'High' : 'Medium',
+        completionScore: typeof result.completionScore === 'number' ? Math.min(1, Math.max(0, result.completionScore)) : 0.5,
+        contractType: result.contractType,
+        parties: Array.isArray(result.parties) ? result.parties : [],
+        keyTerms: Array.isArray(result.keyTerms) ? result.keyTerms : [],
+        importantDates: result.importantDates || {},
+        paymentTerms: result.paymentTerms,
+        terminationClauses: Array.isArray(result.terminationClauses) ? result.terminationClauses : [],
+        concerningPoints: Array.isArray(result.concerningPoints) ? result.concerningPoints : [],
+        overallSummary: result.overallSummary,
+      };
+    } catch (e) {
+      if (e instanceof AnalysisError) throw e;
+
+      if (parseAttempts < MAX_PARSE_RETRIES) {
+        parseAttempts++;
+        console.warn(`Parse attempt ${parseAttempts} failed, retrying once...`, e);
+        await new Promise((r) => setTimeout(r, 1000));
+        continue;
+      }
       throw new AnalysisError(
-        'EMPTY_CONTENT',
-        'Document is empty',
-        'The provided document appears to be empty or could not be read.',
+        'INVALID_RESPONSE',
+        "We couldn't understand the AI response. Please try again.",
+        (e as Error)?.message || 'Parse failed',
         false
       );
     }
-    
-    // 4. Generate prompt with strict JSON format requirement
-    const prompt = generatePrompt(content, file.name);
-    
-    // 5. Get completion from Gemini with retry logic for JSON parsing
-    let attempts = 0;
-    const maxAttempts = 3;
-    let lastError: Error | null = null;
-    
-    while (attempts < maxAttempts) {
-      try {
-        const response = await getCompletion(prompt);
-        
-        if (!response?.data) {
-          throw new Error('Received empty or invalid response from AI service');
-        }
-        
-        // Extract the text content from the response
-        let completionText = '';
-        const responseData = response.data;
-        
-        // Handle different possible response structures with better type safety
-        if (Array.isArray(responseData.candidates) && responseData.candidates.length > 0) {
-          const candidate = responseData.candidates[0];
-          if (candidate?.content?.parts?.[0]?.text) {
-            // Google Gemini response format
-            completionText = candidate.content.parts[0].text;
-          }
-        } else if (Array.isArray(responseData.choices) && responseData.choices.length > 0) {
-          const choice = responseData.choices[0];
-          if (choice?.message?.content) {
-            // OpenAI-compatible format
-            completionText = choice.message.content;
-          }
-        } else if (typeof responseData.text === 'string') {
-          // Direct text response
-          completionText = responseData.text;
-        } else if (typeof responseData === 'string') {
-          // If the response is already a string
-          completionText = responseData;
-        } else {
-          // Fallback: try to stringify the response
-          try {
-            completionText = JSON.stringify(responseData);
-          } catch (e) {
-            console.error('Failed to stringify response data:', e);
-          }
-        }
-        
-        if (!completionText || typeof completionText !== 'string' || completionText.trim().length === 0) {
-          throw new Error('Received empty or invalid completion text from the AI service');
-        }
-        
-        // Parse the completion and ensure all required fields are present
-        const result = parseCompletion(completionText);
-        
-        // Create a complete result object with all required fields
-        const completeResult: AnalysisResult = {
-          id: result.id || uuidv4(),
-          fileName: file.name,
-          fileSize: file.size,
-          analysisDate: result.analysisDate || new Date().toISOString(),
-          summary: result.summary || { points: [] },
-          documentType: result.documentType || 'Document',
-          fields: Array.isArray(result.fields) ? result.fields : [],
-          riskLevel: ['Low', 'Medium', 'High'].includes(result.riskLevel) 
-            ? result.riskLevel as 'Low' | 'Medium' | 'High' 
-            : 'Medium',
-          completionScore: typeof result.completionScore === 'number' 
-            ? Math.min(1, Math.max(0, result.completionScore)) // Ensure between 0 and 1
-            : 0.5, // Default to 50% if not provided
-          // Include any additional fields
-          contractType: result.contractType,
-          parties: Array.isArray(result.parties) ? result.parties : [],
-          keyTerms: Array.isArray(result.keyTerms) ? result.keyTerms : [],
-          importantDates: result.importantDates || {},
-          paymentTerms: result.paymentTerms,
-          terminationClauses: Array.isArray(result.terminationClauses) ? result.terminationClauses : [],
-          concerningPoints: Array.isArray(result.concerningPoints) ? result.concerningPoints : [],
-          overallSummary: result.overallSummary
-        };
-        
-        return completeResult;
-      } catch (error) {
-        lastError = error as Error;
-        console.error(`Attempt ${attempts + 1} failed:`, error);
-        attempts++;
-        
-        // If we've tried too many times, give up
-        if (attempts >= maxAttempts) {
-          const errorMessage = lastError?.message || 'Unknown error occurred';
-          console.error('All attempts failed. Last error:', errorMessage);
-          throw new AnalysisError(
-            'INVALID_RESPONSE',
-            'Failed to parse AI response',
-            `The AI response could not be processed. ${errorMessage}`,
-            true
-          );
-        }
-        
-        // Wait a bit before retrying
-        const waitTime = 1000 * attempts;
-        console.log(`Waiting ${waitTime}ms before retry...`);
-        await new Promise(resolve => setTimeout(resolve, waitTime));
-      }
-    }
-    
-    // This should theoretically never be reached due to the throw above
-    throw lastError || new Error('Unknown error occurred during analysis');
-    
-  } catch (error) {
-    // If it's already an AnalysisError, just rethrow it
-    if (error instanceof AnalysisError) {
-      throw error;
-    }
-    
-    // Handle Axios errors
-    if (axios.isAxiosError(error)) {
-      console.error('Axios error during analysis:', {
-        message: error.message,
-        code: error.code,
-        status: error.response?.status,
-        statusText: error.response?.statusText,
-        data: error.response?.data
-      });
-      
-      throw new AnalysisError(
-        'API_ERROR',
-        'Failed to communicate with the AI service',
-        error.response?.data?.message || error.message,
-        true
-      );
-    }
-    
-    // Handle other unexpected errors
-    const errorMessage = error instanceof Error ? error.message : 'An unknown error occurred';
-    console.error('Unexpected error during analysis:', error);
-    
-    throw new AnalysisError(
-      'ANALYSIS_FAILED',
-      'Failed to analyze document',
-      errorMessage,
-      true
-    );
   }
 };
 

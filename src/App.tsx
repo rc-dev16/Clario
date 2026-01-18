@@ -9,7 +9,7 @@ import AnalysisResultPage from './components/results/ResultPage';
 
 function App() {
   return (
-    <Router>
+    <Router future={{ v7_relativeSplatPath: true }}>
       <AuthProvider>
         <Routes>
           <Route path="/" element={<LandingPage />} />

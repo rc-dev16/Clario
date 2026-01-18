@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { v4 as uuidv4 } from 'uuid';
 import { FiSend } from 'react-icons/fi';
 import { Scale } from 'lucide-react';
-import axios from 'axios';
+import { callGemini } from '../../services/geminiApi';
 
 interface DocumentChatProps {
   result: any;
@@ -111,48 +111,37 @@ const DocumentChat: React.FC<DocumentChatProps> = ({ result }) => {
   const [error, setError] = useState<string | null>(null);
   const [typing, setTyping] = useState(false);
   const chatEndRef = useRef<HTMLDivElement | null>(null);
+  const isSendingRef = useRef(false);
 
-  // Gemini API call logic
-  const askGeminiAPI = async (context: string, prompt: string): Promise<string> => {
+  // Gemini API: uses callGemini (callable when VITE_GOOGLE_API_KEY unset; key never in client)
+  const askGeminiAPI = async (_context: string, prompt: string): Promise<string> => {
     try {
-      const apiKey = import.meta.env.VITE_GOOGLE_API_KEY;
-      if (!apiKey) throw new Error('Gemini API key not configured');
-      const response = await axios.post(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
-        {
-          contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: {
-            temperature: 0.2,
-            topP: 0.95,
-            topK: 40,
-            maxOutputTokens: 1024,
-            responseMimeType: 'application/json',
-          }
+      const { data } = await callGemini({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: {
+          temperature: 0.2,
+          topP: 0.95,
+          topK: 40,
+          maxOutputTokens: 1024,
+          responseMimeType: 'application/json',
         },
-        {
-          headers: {
-            'Content-Type': 'application/json',
-            'Accept': 'application/json'
-          },
-          timeout: 30000
-        }
-      );
-      const data = response.data;
+      });
+      const d = data as { candidates?: { content?: { parts?: { text?: string }[] } }[]; choices?: { message?: { content?: string } }[]; text?: string };
       let completionText = '';
-      if (Array.isArray(data.candidates) && data.candidates.length > 0) {
-        const candidate = data.candidates[0];
+      if (Array.isArray(d?.candidates) && d.candidates.length > 0) {
+        const candidate = d.candidates[0];
         if (candidate?.content?.parts?.[0]?.text) {
           completionText = candidate.content.parts[0].text;
         }
-      } else if (Array.isArray(data.choices) && data.choices.length > 0) {
-        const choice = data.choices[0];
+      } else if (Array.isArray(d?.choices) && d.choices.length > 0) {
+        const choice = d.choices[0];
         if (choice?.message?.content) {
           completionText = choice.message.content;
         }
-      } else if (typeof data.text === 'string') {
-        completionText = data.text;
-      } else if (typeof data === 'string') {
-        completionText = data;
+      } else if (typeof d?.text === 'string') {
+        completionText = d.text;
+      } else if (typeof d === 'string') {
+        completionText = d;
       }
       if (!completionText) throw new Error('No response from Gemini');
       let finalText = completionText;
@@ -165,12 +154,14 @@ const DocumentChat: React.FC<DocumentChatProps> = ({ result }) => {
       return finalText;
     } catch (e: any) {
       console.error('Gemini API error:', e);
-      throw new Error(e?.message || 'Failed to get response from Gemini API');
+      throw new Error('AI is temporarily unavailable. Please try again.');
     }
   };
 
-  // Use Gemini for AI response
+  // Use Gemini for AI response (guard prevents concurrent/duplicate Gemini API calls)
   const sendMessage = async (question: string) => {
+    if (isSendingRef.current) return;
+    isSendingRef.current = true;
     setLoading(true);
     setError(null);
     setMessages((prev) => {
@@ -190,15 +181,16 @@ const DocumentChat: React.FC<DocumentChatProps> = ({ result }) => {
       });
     } catch (e) {
       setTyping(false);
-      setError('Failed to get response from Gemini.');
+      setError(typeof (e as Error)?.message === 'string' ? (e as Error).message : 'AI is temporarily unavailable. Please try again.');
     } finally {
       setLoading(false);
+      isSendingRef.current = false;
     }
   };
 
   const handleSend = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!input.trim() || loading) return;
+    if (!input.trim() || loading || isSendingRef.current) return;
     await sendMessage(input.trim());
     setInput('');
   };

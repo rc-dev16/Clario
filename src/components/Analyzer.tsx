@@ -1,24 +1,11 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import FileUpload from './FileUpload';
 import { analyzeDocument, incrementContractsAnalyzed, getContractsAnalyzed } from '../services/analysisService';
+import { validateFile } from '../services/geminiService';
 import { useNavigate } from 'react-router-dom';
 import Header from './header2';
-import { 
-  Upload, 
-  Zap, 
-  Shield, 
-  CheckCircle, 
-  Users, 
-  Sparkles, 
-  ArrowRight, 
-  FileText, 
-  Clock, 
-  TrendingUp,
-  Star,
-  Globe,
-  Lock
-} from 'lucide-react';
+import { Zap, Shield, CheckCircle, Users, Sparkles, FileText, Star } from 'lucide-react';
 
 // Continuous Typing Animation Hook
 const useContinuousTyping = (text: string, speed: number = 80, pauseDuration: number = 2000, startDelay: number = 0) => {
@@ -75,6 +62,7 @@ const Analyzer: React.FC = () => {
   const [isVisible, setIsVisible] = useState(false);
   const navigate = useNavigate();
   const [contractsAnalyzed, setContractsAnalyzed] = useState<number>(0);
+  const analyzingRef = useRef(false);
 
   // Continuous typing animation for the main heading
   const headingAnimation = useContinuousTyping("Upload Your Legal Contract", 80, 2000);
@@ -83,22 +71,30 @@ const Analyzer: React.FC = () => {
     setIsVisible(true);
   }, []);
 
-  // Fetch contractsAnalyzed from Firestore on mount and when user changes
+  // Fetch contractsAnalyzed from Firestore on mount and when user id changes (use user?.id to avoid re-runs from user object reference changes)
   useEffect(() => {
+    if (!user?.id) return;
+    let cancelled = false;
     const fetchCount = async () => {
-      if (user) {
-        const count = await getContractsAnalyzed(user.id);
-        setContractsAnalyzed(count);
-      }
+      const count = await getContractsAnalyzed(user.id);
+      if (!cancelled) setContractsAnalyzed(count);
     };
     fetchCount();
-  }, [user]);
+    return () => { cancelled = true; };
+  }, [user?.id]);
 
   const handleFileUpload = async (file: File) => {
     if (!user) return;
 
+    // Validate file before proceeding
+    const fileError = validateFile(file);
+    if (fileError) {
+      setError(fileError.message);
+      return;
+    }
+
     // ENFORCE FREE PLAN LIMIT BASED ON FIRESTORE CONTRACT COUNT
-    if (user.plan === 'free') {
+    if (user.plan === 'free' && !user.isTester) {
       const count = await getContractsAnalyzed(user.id);
       if (count >= user.maxContracts) {
         setError('You have reached the maximum number of uploads for the free plan.');
@@ -106,28 +102,38 @@ const Analyzer: React.FC = () => {
       }
     }
 
+    // Prevent concurrent Gemini API calls (e.g. double drop, double file select)
+    if (analyzingRef.current) return;
+    analyzingRef.current = true;
+
     setUploadedFile(file);
     setIsAnalyzing(true);
     setError(null);
 
     try {
       const result = await analyzeDocument(file);
-      // Save to localStorage and update user stats
       const existingContracts = JSON.parse(localStorage.getItem('contracts') || '[]');
-      const updatedContracts = [result, ...existingContracts];
-      localStorage.setItem('contracts', JSON.stringify(updatedContracts));
-      // Update contract count in Firestore
-      await incrementContractsAnalyzed(user.id);
-      // Refresh contract count in UI
-      const newCount = await getContractsAnalyzed(user.id);
-      setContractsAnalyzed(newCount);
-      // Redirect to result page
+      localStorage.setItem('contracts', JSON.stringify([result, ...existingContracts]));
+
+      try {
+        await incrementContractsAnalyzed(user.id);
+        setContractsAnalyzed((c) => c + 1);
+      } catch (_) {
+        console.warn('incrementContractsAnalyzed failed; count may be stale until refresh.');
+      }
       navigate(`/results/${result.id}`);
     } catch (error) {
       console.error('Analysis failed:', error);
-      setError('Analysis failed. Please try again or contact support.');
+      if (error instanceof Error) {
+        setError(error.message);
+      } else if (typeof error === 'string') {
+        setError(error);
+      } else {
+        setError('Analysis failed. Please try again or contact support.');
+      }
     } finally {
       setIsAnalyzing(false);
+      analyzingRef.current = false;
     }
   };
 
@@ -164,13 +170,6 @@ const Analyzer: React.FC = () => {
       description: "Complex legal jargon translated into easy-to-understand language",
       color: "from-violet-400 to-purple-500"
     }
-  ];
-
-  const stats = [
-    { number: "10,000+", label: "Contracts Analyzed", icon: Globe },
-    { number: "99.9%", label: "Accuracy Rate", icon: TrendingUp },
-    { number: "5 min", label: "Average Analysis Time", icon: Clock },
-    { number: "Enterprise", label: "Security Grade", icon: Lock }
   ];
 
   return (
@@ -255,7 +254,7 @@ const Analyzer: React.FC = () => {
                   <div className="text-center">
                     <div className="flex items-center justify-center gap-2 text-gray-500 mb-2">
                       <FileText className="h-5 w-5" />
-                      <span className="text-sm font-medium">Supported formats: PDF, DOC, DOCX, TXT</span>
+                      <span className="text-sm font-medium">Supported formats: PDF, DOC, DOCX, TXT (Max 10MB)</span>
                     </div>
                     <p className="text-gray-400 text-sm">
                       Your document is processed securely and never stored permanently
